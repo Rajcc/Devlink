@@ -1,18 +1,23 @@
 // ProfileStack.js
-import { createStackNavigator } from '@react-navigation/stack';
+import { createStackNavigator, CardStyleInterpolators } from '@react-navigation/stack';
 import First from './screen/First';
 import MessageRequestsScreen from './screen/MessageRequestsScreen';
 import ChatScreen from './screen/ChatScreen';
 import ConversationsScreen from './screen/ConversationsScreen';
 
 
+
+
 const Stack = createStackNavigator();
 
 export default function firstStack() {
+ 
+
+
    return (
    <Stack.Navigator 
       screenOptions={{ 
-        headerShown: false // Hide default headers since Profile has custom header
+        headerShown: false, // Hide default headers since Profile has custom header
       }}
     >
       <Stack.Screen 
@@ -33,8 +38,46 @@ export default function firstStack() {
                 headerStyle: {
                   backgroundColor: '#1e1e1e' },
                 headerTintColor: '#fff',
-            headerTitleStyle: {fontWeight: 'bold' },
-            presentation: 'card',
+                headerTitleStyle: {fontWeight: 'bold' },
+                presentation: 'card',
+                // Custom slide animation - slide from right to left when opening
+                cardStyleInterpolator: CardStyleInterpolators.forHorizontalIOS,
+                transitionSpec: {
+                  open: {
+                    animation: 'timing',
+                    config: {
+                      duration: 300,
+                    },
+                  },
+                  close: {
+                    animation: 'timing',
+                    config: {
+                      duration: 250,
+                    },
+                  },
+                },
+                // Alternative animation options (uncomment to use):
+                // Fade + Scale animation:
+                // cardStyleInterpolator: ({ current, next, layouts }) => {
+                //   return {
+                //     cardStyle: {
+                //       opacity: current.progress.interpolate({
+                //         inputRange: [0, 1],
+                //         outputRange: [0, 1],
+                //       }),
+                //       transform: [
+                //         {
+                //           scale: current.progress.interpolate({
+                //             inputRange: [0, 1],
+                //             outputRange: [0.9, 1],
+                //           }),
+                //         },
+                //       ],
+                //     },
+                //   };
+                // },
+                // Modal slide up animation:
+                // cardStyleInterpolator: CardStyleInterpolators.forModalPresentationIOS,
               }}
             />
       

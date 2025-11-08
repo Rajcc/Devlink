@@ -41,13 +41,7 @@ async function getUserProfile(uid) {
    - acceptedAt?: timestamp
    - chatId?: string (created after acceptance)
 
-4. userChats/{userId}/chats/{chatId}
-   - chatId: string
-   - lastReadAt: timestamp
-   - unreadCount: number
-   - isPinned: boolean
-   - isArchived: boolean
-   - joinedAt: timestamp
+4. (removed) per-user chat mapping collection (deprecated)
 
 5. profile/{userId}/following/{followedUserId}
    - followedAt: timestamp
@@ -196,28 +190,7 @@ async acceptMessageRequest(requestId, recipientId) {
       await chatRef.set(basicChatData);
       console.log('Basic chat created');
 
-      // Create user chat entries
-      const now = firestore.FieldValue.serverTimestamp();
       
-      await Promise.all([
-        this.db.collection('userChats').doc(requestData.senderId).collection('chats').doc(chatId).set({
-          chatId,
-          lastReadAt: now,
-          unreadCount: 0,
-          isPinned: false,
-          isArchived: false,
-          joinedAt: now
-        }),
-        this.db.collection('userChats').doc(recipientId).collection('chats').doc(chatId).set({
-          chatId,
-          lastReadAt: now,
-          unreadCount: 0,
-          isPinned: false,
-          isArchived: false,
-          joinedAt: now
-        })
-      ]);
-      console.log('User chat entries created');
     } else {
       console.log('Chat already exists');
     }
@@ -369,10 +342,7 @@ async createDirectChat(userId1, userId2, customChatId = null) {
     if (existingChat.exists) {
       console.log('Chat already exists:', chatId);
       const chatData = existingChat.data();
-      
-      // Ensure both users have userChats entries
-      await this.ensureUserChatEntries(chatId, [userId1, userId2]);
-      
+
       return { id: chatId, ...chatData };
     }
 
@@ -430,34 +400,6 @@ async createDirectChat(userId1, userId2, customChatId = null) {
         console.log('Creating chat document in transaction');
         // Create chat document
         transaction.set(chatRef, chatData);
-
-        // Add to each user's chat list with proper timestamps
-        const now = firestore.FieldValue.serverTimestamp();
-        
-        const userChat1Ref = this.db.collection('userChats').doc(userId1).collection('chats').doc(chatId);
-        const userChat2Ref = this.db.collection('userChats').doc(userId2).collection('chats').doc(chatId);
-
-        console.log('Creating userChat entries in transaction');
-        console.log('UserChat1 ref path:', userChat1Ref.path);
-        console.log('UserChat2 ref path:', userChat2Ref.path);
-        
-        transaction.set(userChat1Ref, {
-          chatId,
-          lastReadAt: now,
-          unreadCount: 0,
-          isPinned: false,
-          isArchived: false,
-          joinedAt: now
-        });
-
-        transaction.set(userChat2Ref, {
-          chatId,
-          lastReadAt: now,
-          unreadCount: 0,
-          isPinned: false,
-          isArchived: false,
-          joinedAt: now
-        });
         
         console.log('Transaction prepared, committing...');
       });
@@ -468,28 +410,6 @@ async createDirectChat(userId1, userId2, customChatId = null) {
     }
 
     console.log('Direct chat created successfully:', chatId);
-    
-    // Verify the userChats entries were created
-    try {
-      const userChat1Doc = await this.db.collection('userChats').doc(userId1).collection('chats').doc(chatId).get();
-      const userChat2Doc = await this.db.collection('userChats').doc(userId2).collection('chats').doc(chatId).get();
-      
-      if (!userChat1Doc.exists || !userChat2Doc.exists) {
-        console.error('UserChat entries not created properly, attempting to fix...');
-        await this.createUserChatEntriesDirectly(chatId, userId1, userId2);
-      } else {
-        console.log('UserChat entries verified successfully');
-      }
-    } catch (verifyError) {
-      console.error('Error verifying userChat entries:', verifyError);
-      // Try direct creation as last resort
-      try {
-        console.log('Attempting direct userChat creation as fallback...');
-        await this.createUserChatEntriesDirectly(chatId, userId1, userId2);
-      } catch (fallbackError) {
-        console.error('Fallback userChat creation also failed:', fallbackError);
-      }
-    }
     
     // Return the chat data with proper structure for the drawer
     return { 
@@ -509,68 +429,9 @@ async createDirectChat(userId1, userId2, customChatId = null) {
   }
 }
 
-// Add this helper function to ensure userChat entries exist
-async ensureUserChatEntries(chatId, participants) {
-  try {
-    console.log('Ensuring userChat entries for chat:', chatId, 'participants:', participants);
-    const now = firestore.FieldValue.serverTimestamp();
-    
-    for (const userId of participants) {
-      const userChatRef = this.db.collection('userChats').doc(userId).collection('chats').doc(chatId);
-      const userChatDoc = await userChatRef.get();
-      
-      if (!userChatDoc.exists) {
-        console.log(`Creating userChat entry for ${userId} in chat ${chatId}`);
-        await userChatRef.set({
-          chatId,
-          lastReadAt: now,
-          unreadCount: 0,
-          isPinned: false,
-          isArchived: false,
-          joinedAt: now
-        });
-        console.log(`Created missing userChat entry for ${userId} in chat ${chatId}`);
-      } else {
-        console.log(`UserChat entry already exists for ${userId} in chat ${chatId}`);
-      }
-    }
-  } catch (error) {
-    console.error('Error ensuring userChat entries:', error);
-    throw error;
-  }
-}
+// (removed) ensureUserChatEntries
 
-// Alternative method to create userChats without transaction
-async createUserChatEntriesDirectly(chatId, userId1, userId2) {
-  try {
-    console.log('Creating userChat entries directly for chat:', chatId);
-    const now = firestore.FieldValue.serverTimestamp();
-    
-    const userChat1Ref = this.db.collection('userChats').doc(userId1).collection('chats').doc(chatId);
-    const userChat2Ref = this.db.collection('userChats').doc(userId2).collection('chats').doc(chatId);
-    
-    const userChatData = {
-      chatId,
-      lastReadAt: now,
-      unreadCount: 0,
-      isPinned: false,
-      isArchived: false,
-      joinedAt: now
-    };
-    
-    // Create both entries in parallel
-    await Promise.all([
-      userChat1Ref.set(userChatData),
-      userChat2Ref.set(userChatData)
-    ]);
-    
-    console.log('UserChat entries created successfully');
-    return true;
-  } catch (error) {
-    console.error('Error creating userChat entries directly:', error);
-    throw error;
-  }
-}
+// (removed) createUserChatEntriesDirectly
 
 // Ensure chat document has both participants and participantsInfo populated
 async ensureChatParticipants(chatId, userId1, userId2) {
@@ -639,9 +500,7 @@ async ensureChatParticipants(chatId, userId1, userId2) {
       { merge: true }
     );
 
-    // Also ensure userChats entries exist
-    await this.ensureUserChatEntries(chatId, [userId1, userId2]);
-
+    
     return true;
   } catch (error) {
     console.error('Error ensuring chat participants:', error);
@@ -790,28 +649,6 @@ async acceptMessageRequest(requestId, recipientId) {
         
         // Create chat document
         transaction.set(chatRef, chatData);
-
-        // Add to each participant's chat list
-        const now = firestore.FieldValue.serverTimestamp();
-        
-        allParticipants.forEach(userId => {
-          const userChatRef = this.db
-            .collection('userChats')
-            .doc(userId)
-            .collection('chats')
-            .doc(chatId);
-          
-          console.log('Creating userChat entry for:', userId);
-          
-          transaction.set(userChatRef, {
-            chatId,
-            lastReadAt: now,
-            unreadCount: 0,
-            isPinned: false,
-            isArchived: false,
-            joinedAt: now
-          });
-        });
         
         console.log('Transaction prepared, committing...');
       });
@@ -824,48 +661,6 @@ async acceptMessageRequest(requestId, recipientId) {
     }
 
     console.log('Group chat created successfully:', chatId);
-    
-    // Verify the userChats entries were created
-    try {
-      const verificationPromises = allParticipants.map(userId =>
-        this.db.collection('userChats').doc(userId).collection('chats').doc(chatId).get()
-      );
-      
-      const userChatDocs = await Promise.all(verificationPromises);
-      const missingEntries = userChatDocs
-        .map((doc, index) => ({ exists: doc.exists, userId: allParticipants[index] }))
-        .filter(item => !item.exists);
-      
-      if (missingEntries.length > 0) {
-        console.error('Some userChat entries not created:', missingEntries);
-        console.log('Attempting to fix missing entries...');
-        
-        // Create missing entries directly
-        const now = firestore.FieldValue.serverTimestamp();
-        await Promise.all(
-          missingEntries.map(({ userId }) =>
-            this.db
-              .collection('userChats')
-              .doc(userId)
-              .collection('chats')
-              .doc(chatId)
-              .set({
-                chatId,
-                lastReadAt: now,
-                unreadCount: 0,
-                isPinned: false,
-                isArchived: false,
-                joinedAt: now
-              })
-          )
-        );
-        console.log('Missing userChat entries created');
-      } else {
-        console.log('All userChat entries verified successfully');
-      }
-    } catch (verifyError) {
-      console.error('Error verifying userChat entries:', verifyError);
-    }
 
     // Return the chat data with proper structure
     return { 
@@ -970,45 +765,7 @@ async sendMessage(chatId, senderId, text, imageUrl = null) {
     });
 
     console.log('Chat last message updated');
-
-    // Update unread counts for other participants
-    const otherParticipants = chatData.participants.filter(id => id !== senderId);
-    console.log('Updating unread counts for:', otherParticipants);
     
-    for (const userId of otherParticipants) {
-      try {
-        const userChatRef = this.db
-          .collection('userChats')
-          .doc(userId)
-          .collection('chats')
-          .doc(chatId);
-        
-        const userChatDoc = await userChatRef.get();
-        
-        if (userChatDoc.exists) {
-          const currentUnread = userChatDoc.data().unreadCount || 0;
-          await userChatRef.update({
-            unreadCount: currentUnread + 1
-          });
-          console.log(`Updated unread count for ${userId}: ${currentUnread + 1}`);
-        } else {
-          // Create user chat entry if it doesn't exist
-          await userChatRef.set({
-            chatId,
-            lastReadAt: firestore.FieldValue.serverTimestamp(),
-            unreadCount: 1,
-            isPinned: false,
-            isArchived: false,
-            joinedAt: firestore.FieldValue.serverTimestamp()
-          });
-          console.log(`Created user chat entry for ${userId}`);
-        }
-      } catch (error) {
-        console.error(`Error updating unread count for user ${userId}:`, error);
-        // Continue with other users even if one fails
-      }
-    }
-
     console.log('Message sent successfully:', messageRef.id);
     return { id: messageRef.id, ...messageData };
 
@@ -1020,17 +777,6 @@ async sendMessage(chatId, senderId, text, imageUrl = null) {
   // Mark messages as read
   async markMessagesAsRead(chatId, userId) {
     try {
-      // Update user's last read time
-      await this.db
-        .collection('userChats')
-        .doc(userId)
-        .collection('chats')
-        .doc(chatId)
-        .update({
-          lastReadAt: firestore.FieldValue.serverTimestamp(),
-          unreadCount: 0
-        });
-
       // Update readBy for recent messages
       const messagesRef = this.db
         .collection('chats')
@@ -1058,7 +804,7 @@ async sendMessage(chatId, senderId, text, imageUrl = null) {
     }
   }
 
-  // Permanently delete a chat: removes messages, chat doc, and userChats entries
+  // Permanently delete a chat: removes messages and the chat document
   async deleteChatPermanently(chatId) {
     try {
       if (!chatId) throw new Error('Chat ID is required');
@@ -1087,17 +833,7 @@ async sendMessage(chatId, senderId, text, imageUrl = null) {
         if (snap.size < 200) break;
       }
 
-      // 2) Delete userChats entries for all participants
-      if (participants.length > 0) {
-        const batch = this.db.batch();
-        participants.forEach(uid => {
-          const userChatRef = this.db.collection('userChats').doc(uid).collection('chats').doc(chatId);
-          batch.delete(userChatRef);
-        });
-        await batch.commit();
-      }
-
-      // 3) Delete the chat document itself
+      // 2) Delete the chat document itself
       await chatRef.delete();
 
       return true;
@@ -1107,31 +843,16 @@ async sendMessage(chatId, senderId, text, imageUrl = null) {
     }
   }
 
-  // Get user's chats
+  // Get user's chats (participants-based)
   async getUserChats(userId) {
     try {
-      const userChatsSnapshot = await this.db
-        .collection('userChats')
-        .doc(userId)
-        .collection('chats')
-        .orderBy('lastReadAt', 'desc')
-        .get();
-
-      const chatIds = userChatsSnapshot.docs.map(doc => doc.data().chatId);
-      
-      if (chatIds.length === 0) return [];
-
       const chatsSnapshot = await this.db
         .collection('chats')
-        .where(firestore.FieldPath.documentId(), 'in', chatIds)
+        .where('participants', 'array-contains', userId)
+        .orderBy('updatedAt', 'desc')
         .get();
 
-      const chats = chatsSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-
-      return chats;
+      return chatsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     } catch (error) {
       console.error('Error getting user chats:', error);
       return [];
@@ -1197,30 +918,13 @@ async getPendingMessageRequestsSent(userId) {
       .onSnapshot(callback);
   }
 
-  // Listen to user's chats
+  // Listen to user's chats (participants-based)
   subscribeToUserChats(userId, callback) {
     return this.db
-      .collection('userChats')
-      .doc(userId)
       .collection('chats')
-      .onSnapshot(async (snapshot) => {
-        const chatIds = snapshot.docs.map(doc => doc.data().chatId);
-        
-        if (chatIds.length === 0) {
-          callback([]);
-          return;
-        }
-
-        const chatsSnapshot = await this.db
-          .collection('chats')
-          .where(firestore.FieldPath.documentId(), 'in', chatIds)
-          .get();
-
-        const chats = chatsSnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-
+      .where('participants', 'array-contains', userId)
+      .onSnapshot((snapshot) => {
+        const chats = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         callback(chats);
       });
   }
@@ -1350,68 +1054,7 @@ async checkExistingChat(userId1, userId2) {
     return { exists: false, chatId: null };
   }
 }
-  // Create userChats entries for existing chats
-  async createUserChatsForExistingChats() {
-    try {
-      const currentUserId = auth().currentUser?.uid;
-      if (!currentUserId) {
-        throw new Error('No current user found');
-      }
-
-      console.log('Creating userChats for existing chats for user:', currentUserId);
-
-      // Get all chats where the current user is a participant
-      const chatsSnapshot = await this.db
-        .collection('chats')
-        .where('participants', 'array-contains', currentUserId)
-        .get();
-
-      console.log('Found', chatsSnapshot.docs.length, 'chats for user');
-
-      const batch = this.db.batch();
-      const now = firestore.FieldValue.serverTimestamp();
-
-      for (const chatDoc of chatsSnapshot.docs) {
-        const chatData = chatDoc.data();
-        const chatId = chatDoc.id;
-
-        // Check if userChat entry already exists
-        const userChatRef = this.db
-          .collection('userChats')
-          .doc(currentUserId)
-          .collection('chats')
-          .doc(chatId);
-
-        const userChatDoc = await userChatRef.get();
-
-        if (!userChatDoc.exists) {
-          console.log('Creating userChat entry for chat:', chatId);
-          
-          batch.set(userChatRef, {
-            chatId,
-            lastReadAt: now,
-            unreadCount: 0,
-            isPinned: false,
-            isArchived: false,
-            joinedAt: now
-          });
-        }
-      }
-
-      if (batch._writes.length > 0) {
-        await batch.commit();
-        console.log('Successfully created userChats for existing chats');
-        return true;
-      } else {
-        console.log('All userChats entries already exist');
-        return true;
-      }
-
-    } catch (error) {
-      console.error('Error creating userChats for existing chats:', error);
-      throw error;
-    }
-  }
+  
 }
 
 const chatServiceInstance = new chatService();

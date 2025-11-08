@@ -27,16 +27,21 @@ import auth from '@react-native-firebase/auth';
 
 const Drawer = createDrawerNavigator();
 
+const PERMISSIONs_REQUESTED_KEY='@permissions_requested'
+
 // Platform-specific status bar height helper
 const getStatusBarHeight = () => {
   return Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
 };
+
+
 
 // Custom Drawer Content
 function CustomDrawerContent({ navigation }) {
   const [search, setSearch] = useState('');
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [activeConversations, setActiveConversations] = useState([]);
   const [pendingRequests, setPendingRequests] = useState([]);
   const [receivedRequests, setReceivedRequests] = useState([]);
@@ -56,6 +61,8 @@ function CustomDrawerContent({ navigation }) {
     getCachedImageUri,
     currentUser,
   } = useUserData();
+
+ 
 
   // Enhanced error handling for conversations loading
  const loadActiveConversations = () => {
@@ -145,8 +152,9 @@ function CustomDrawerContent({ navigation }) {
               for (const chatDoc of chatsSnapshot.docs) {
                 const chatData = chatDoc.data();
                 const chatId = chatDoc.id;
+                const chatType = chatData.type || 'direct';
                 
-                console.log('Processing chat in fallback:', chatId, 'Data:', chatData);
+                console.log('Processing chat in fallback:', chatId, 'Type:', chatType, 'Data:', chatData);
                 
                 // Skip inactive chats
                 if (chatData.isActive === false) {
@@ -154,60 +162,93 @@ function CustomDrawerContent({ navigation }) {
                   continue;
                 }
                 
-                // Handle chats with missing or undefined participants
-                let participants = chatData.participants;
-                if (!participants || !Array.isArray(participants) || participants.length === 0) {
-                  console.log('Chat has missing participants, attempting to fix:', chatId);
-                  
-                  // Try to extract participants from chat ID (common pattern: userId1_userId2)
-                  if (chatId.includes('_')) {
-                    const possibleUserIds = chatId.split('_');
-                    participants = possibleUserIds.filter(id => id && id.length > 10); // Filter out short IDs
-                    console.log('Extracted participants from chat ID:', participants);
+                let conversationItem;
+                
+                // Handle group chats differently from direct chats
+                if (chatType === 'group') {
+                  // For group chats, use chatId as the unique identifier
+                  conversationItem = {
+                    id: chatId, // Use chatId for groups to ensure uniqueness
+                    conversationId: chatId,
+                    type: 'group',
+                    name: chatData.metadata?.name || 'Group Chat',
+                    displayName: chatData.metadata?.name || 'Group Chat',
+                    avatar: chatData.metadata?.avatar || null,
+                    username: 'group',
+                    lastMessage: chatData.lastMessage?.text || '',
+                    lastMessageTime: chatData.lastMessage?.createdAt || chatData.updatedAt || chatData.createdAt,
+                    unreadCount: 0,
+                    isPinned: false,
+                    isArchived: false,
+                    joinedAt: chatData.createdAt,
+                    participants: chatData.participants || [],
+                    participantsInfo: chatData.participantsInfo || {}
+                  };
+                } else {
+                  // Handle direct chats - find other participant
+                  let participants = chatData.participants;
+                  if (!participants || !Array.isArray(participants) || participants.length === 0) {
+                    console.log('Chat has missing participants, attempting to fix:', chatId);
                     
-                    // Update the chat document with the extracted participants
-                    try {
-                      await firestore().collection('chats').doc(chatId).update({
-                        participants: participants,
-                        isActive: true,
-                        type: 'direct',
-                        updatedAt: firestore.FieldValue.serverTimestamp()
-                      });
-                      console.log('Updated chat with extracted participants:', chatId);
-                    } catch (updateError) {
-                      console.error('Error updating chat participants:', updateError);
+                    // Try to extract participants from chat ID (common pattern: userId1_userId2)
+                    if (chatId.includes('_') && !chatId.startsWith('group_')) {
+                      const possibleUserIds = chatId.split('_');
+                      participants = possibleUserIds.filter(id => id && id.length > 10); // Filter out short IDs
+                      console.log('Extracted participants from chat ID:', participants);
+                      
+                      // Update the chat document with the extracted participants
+                      try {
+                        await firestore().collection('chats').doc(chatId).update({
+                          participants: participants,
+                          isActive: true,
+                          type: 'direct',
+                          updatedAt: firestore.FieldValue.serverTimestamp()
+                        });
+                        console.log('Updated chat with extracted participants:', chatId);
+                      } catch (updateError) {
+                        console.error('Error updating chat participants:', updateError);
+                      }
+                    } else {
+                      console.log('Cannot extract participants from chat ID, skipping:', chatId);
+                      continue;
                     }
-                  } else {
-                    console.log('Cannot extract participants from chat ID, skipping:', chatId);
+                  }
+                  
+                  const otherParticipantId = participants.find(id => id !== currentUserId);
+                  if (!otherParticipantId) {
+                    console.log('No other participant found in chat:', chatId, 'Participants:', participants);
                     continue;
                   }
-                }
-                
-                const otherParticipantId = participants.find(id => id !== currentUserId);
-                if (!otherParticipantId) {
-                  console.log('No other participant found in chat:', chatId, 'Participants:', participants);
-                  continue;
-                }
-                
-                let participantInfo = chatData.participantsInfo?.[otherParticipantId];
-                
-                if (!participantInfo || !participantInfo.name) {
-                  try {
-                    const userDoc = await firestore()
-                      .collection('profile')
-                      .doc(otherParticipantId)
-                      .get();
-                    
-                    if (userDoc.exists) {
-                      const userData = userDoc.data();
-                      participantInfo = {
-                        id: otherParticipantId,
-                        name: userData.name || userData.displayName || userData.username || 'Unknown User',
-                        displayName: userData.displayName || userData.name || userData.username || 'Unknown User',
-                        avatar: userData.avatar || userData.photoURL || null,
-                        username: userData.username || 'unknown'
-                      };
-                    } else {
+                  
+                  let participantInfo = chatData.participantsInfo?.[otherParticipantId];
+                  
+                  if (!participantInfo || !participantInfo.name) {
+                    try {
+                      const userDoc = await firestore()
+                        .collection('profile')
+                        .doc(otherParticipantId)
+                        .get();
+                      
+                      if (userDoc.exists) {
+                        const userData = userDoc.data();
+                        participantInfo = {
+                          id: otherParticipantId,
+                          name: userData.name || userData.displayName || userData.username || 'Unknown User',
+                          displayName: userData.displayName || userData.name || userData.username || 'Unknown User',
+                          avatar: userData.avatar || userData.photoURL || null,
+                          username: userData.username || 'unknown'
+                        };
+                      } else {
+                        participantInfo = {
+                          id: otherParticipantId,
+                          name: 'Unknown User',
+                          displayName: 'Unknown User',
+                          avatar: null,
+                          username: 'unknown'
+                        };
+                      }
+                    } catch (profileError) {
+                      console.error('Error fetching participant profile:', profileError);
                       participantInfo = {
                         id: otherParticipantId,
                         name: 'Unknown User',
@@ -216,29 +257,22 @@ function CustomDrawerContent({ navigation }) {
                         username: 'unknown'
                       };
                     }
-                  } catch (profileError) {
-                    console.error('Error fetching participant profile:', profileError);
-                    participantInfo = {
-                      id: otherParticipantId,
-                      name: 'Unknown User',
-                      displayName: 'Unknown User',
-                      avatar: null,
-                      username: 'unknown'
-                    };
                   }
+                  
+                  // For direct chats, use conversationId as unique identifier to avoid duplicates
+                  conversationItem = {
+                    id: `direct_${chatId}`, // Prefix with direct_ to ensure uniqueness
+                    conversationId: chatId,
+                    type: 'direct',
+                    ...participantInfo,
+                    lastMessage: chatData.lastMessage?.text || '',
+                    lastMessageTime: chatData.lastMessage?.createdAt || chatData.updatedAt || chatData.createdAt,
+                    unreadCount: 0,
+                    isPinned: false,
+                    isArchived: false,
+                    joinedAt: chatData.createdAt
+                  };
                 }
-                
-                const conversationItem = {
-                  id: otherParticipantId,
-                  conversationId: chatId,
-                  ...participantInfo,
-                  lastMessage: chatData.lastMessage?.text || '',
-                  lastMessageTime: chatData.lastMessage?.createdAt || chatData.updatedAt || chatData.createdAt,
-                  unreadCount: 0, // Default to 0 for fallback
-                  isPinned: false,
-                  isArchived: false,
-                  joinedAt: chatData.createdAt
-                };
                 
                 conversations.push(conversationItem);
                 
@@ -275,13 +309,19 @@ function CustomDrawerContent({ navigation }) {
               
               console.log('Fallback: Final conversations list:', conversations);
               setActiveConversations(conversations);
-              setLoading(false);
+              if (isInitialLoad) {
+                setLoading(false);
+                setIsInitialLoad(false);
+              }
               return;
               
             } catch (fallbackError) {
               console.error('Fallback method failed:', fallbackError);
               setActiveConversations([]);
-              setLoading(false);
+              if (isInitialLoad) {
+                setLoading(false);
+                setIsInitialLoad(false);
+              }
               return;
             }
           }
@@ -421,9 +461,11 @@ function CustomDrawerContent({ navigation }) {
                 const userChatData = userChatsSnapshot.docs
                   .find(doc => doc.data().chatId === chatId)?.data();
 
+                // For direct chats, use conversationId as unique identifier to avoid duplicates
                 const conversationItem = {
-                  id: otherParticipantId,
+                  id: `direct_${chatId}`, // Prefix with direct_ to ensure uniqueness
                   conversationId: chatId,
+                  type: 'direct',
                   ...participantInfo,
                   lastMessage: chatData.lastMessage?.text || '',
                   lastMessageTime: chatData.lastMessage?.createdAt || chatData.updatedAt || chatData.createdAt,
@@ -433,7 +475,7 @@ function CustomDrawerContent({ navigation }) {
                   joinedAt: userChatData?.joinedAt || chatData.createdAt
                 };
 
-                console.log('Created conversation item:', conversationItem);
+                console.log('Created direct conversation item:', conversationItem);
                 
                 // Ensure userChats entry exists for this chat
                 if (!userChatData) {
@@ -494,11 +536,17 @@ function CustomDrawerContent({ navigation }) {
 
           console.log('Final conversations list:', conversations);
           setActiveConversations(conversations);
-          setLoading(false);
+          if (isInitialLoad) {
+            setLoading(false);
+            setIsInitialLoad(false);
+          }
           
         } catch (error) {
           console.error('Error in conversations snapshot:', error);
-          setLoading(false);
+          if (isInitialLoad) {
+            setLoading(false);
+            setIsInitialLoad(false);
+          }
           
           // Don't show alert on first load failure, just retry
           setTimeout(() => {
@@ -509,7 +557,10 @@ function CustomDrawerContent({ navigation }) {
       },
       (error) => {
         console.error('Conversations listener error:', error);
-        setLoading(false);
+        if (isInitialLoad) {
+          setLoading(false);
+          setIsInitialLoad(false);
+        }
         
         // Attempt to reconnect after error
         setTimeout(() => {
@@ -607,10 +658,8 @@ const refreshConversations = React.useCallback(() => {
     React.useCallback(() => {
       if (currentUser) {
         console.log('Drawer focused');
-        // Always refresh conversations when drawer is focused to catch new chats
-        console.log('Refreshing conversations on drawer focus...');
-        loadActiveConversations();
-        // Always load message requests
+        // Only refresh message requests on focus since they can change frequently
+        // The real-time listener on userChats already handles conversation updates
         loadMessageRequests();
       }
     }, [currentUser])
@@ -815,29 +864,6 @@ const refreshConversations = React.useCallback(() => {
 
         // Ensure participants and participantsInfo are set immediately
         await chatService.ensureChatParticipants(conversationId, currentUserId, item.id);
-
-        // Update local state immediately
-        const newConversation = {
-          id: item.id,
-          conversationId,
-          name: item.displayName || item.name || item.username || 'Unknown User',
-          displayName: item.displayName || item.name || item.username || 'Unknown User',
-          avatar: item.avatar || item.photoURL || null,
-          username: item.username || 'unknown',
-          lastMessage: '',
-          lastMessageTime: new Date(),
-          unreadCount: 0,
-          isPinned: false,
-          isArchived: false,
-          joinedAt: new Date()
-        };
-        
-        setActiveConversations(prev => [newConversation, ...prev]);
-
-        // Trigger a refresh of the conversations list to ensure it's updated
-        setTimeout(() => {
-          loadActiveConversations();
-        }, 500);
 
         navigation.getParent().navigate('ChatScreen', {
           chatId: conversationId || item.id,
@@ -1327,7 +1353,13 @@ const refreshConversations = React.useCallback(() => {
     return (
       <FlatList
         data={users}
-        keyExtractor={(item) => item.id}
+        keyExtractor={(item, index) => {
+          // Use unique identifier: prefer uniqueKey, then id, then conversationId, fallback to index
+          if (item.uniqueKey) return item.uniqueKey;
+          if (item.id) return item.id;
+          if (item.conversationId) return item.conversationId;
+          return `item_${index}`;
+        }}
         renderItem={renderChatItem}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -1357,7 +1389,13 @@ const refreshConversations = React.useCallback(() => {
   return (
     <FlatList
       data={users}
-      keyExtractor={(item) => item.id}
+      keyExtractor={(item, index) => {
+        // Use unique identifier: prefer uniqueKey, then id, then conversationId, fallback to index
+        if (item.uniqueKey) return item.uniqueKey;
+        if (item.id) return item.id;
+        if (item.conversationId) return item.conversationId;
+        return `item_${index}`;
+      }}
       renderItem={renderChatItem}
       showsVerticalScrollIndicator={false}
       keyboardShouldPersistTaps="handled"
@@ -1510,7 +1548,6 @@ export default function First() {
     </SafeAreaView>
   );
 }
-
 const styles = StyleSheet.create({
   outerContainer: {
     flex: 1,

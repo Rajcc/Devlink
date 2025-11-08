@@ -5,6 +5,7 @@ import { launchImageLibrary } from 'react-native-image-picker';
 import firestore from '@react-native-firebase/firestore';
 import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
 import { Platform, StatusBar } from 'react-native';
+import {requestcamerapermission,requestgallerypermission} from '../../utils/permissions';
 
 const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0: 0;
 
@@ -181,7 +182,13 @@ const submitReplyToAnswer = async () => {
   }
 };
 
-  const selectImage = () => {
+  const selectImage = async () => {
+   const haspermission= await requestgallerypermission();
+   if(!haspermission){
+  return;
+}
+   
+
     const options = {
       mediaType: 'photo',
       includeBase64: false,

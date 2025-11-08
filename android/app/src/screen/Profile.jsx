@@ -12,10 +12,10 @@ import auth from '@react-native-firebase/auth';
 import storage from '@react-native-firebase/storage';
 import { launchImageLibrary } from 'react-native-image-picker';
 import { useUserData } from '../users';
-// import chatService from './chatService';
-import Post from '../Post';
 import chatService from './chatService';
-import ChatScreen from './ChatScreen';
+import {requestcamerapermission,requestgallerypermission} from '../../utils/permissions';
+
+
 
 const { width } = Dimensions.get('window');
 
@@ -48,10 +48,22 @@ const Profile = () => {
 
   // Collaboration Modal States
   const [collaborationModalVisible, setCollaborationModalVisible] = useState(false);
+  const [projectStatsModalVisible, setProjectStatsModalVisible] = useState(false);
+  const [projectDetailsModalVisible, setProjectDetailsModalVisible] = useState(false);
+  const [projectEditModalVisible, setProjectEditModalVisible] = useState(false);
+  const [selectedProject, setSelectedProject] = useState(null);
+  const [projectParticipants, setProjectParticipants] = useState([]);
+  const [loadingParticipants, setLoadingParticipants] = useState(false);
   const [projectTitle, setProjectTitle] = useState('');
   const [projectAbout, setProjectAbout] = useState('');
   const [projectTech, setProjectTech] = useState('');
   const [githubRepo, setGithubRepo] = useState('');
+  // Editable project form states
+  const [editProjectTitle, setEditProjectTitle] = useState('');
+  const [editProjectAbout, setEditProjectAbout] = useState('');
+  const [editProjectTech, setEditProjectTech] = useState('');
+  const [editGithubRepo, setEditGithubRepo] = useState('');
+  const [updatingProject, setUpdatingProject] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [followingUsers, setFollowingUsers] = useState([]);
   const [filteredUsers, setFilteredUsers] = useState([]);
@@ -81,10 +93,10 @@ const Profile = () => {
   useFocusEffect(
     useCallback(() => {
       if (viewedUserId && isOwnProfile) {
-        if (activeTab === 'questions') {
-          fetchUserQuestions(viewedUserId);
-        }
         loadUserData();
+      }
+      if (activeTab === 'Collaborations' && viewedUserId) {
+        fetchCollaborationProjects();
       }
     }, [viewedUserId, isOwnProfile, activeTab])
   );
@@ -262,32 +274,172 @@ const projectData = {
   };
 
 
-const fetchCollaborationProjects = async () => {
-  if (!currentUser?.uid) return;
+  const fetchCollaborationProjects = async () => {
+    if (!viewedUserId) return;
 
-  try {
-    const projectsSnapshot = await Firestore()
-      .collection('collaborations')
-      .where('creatorId', '==', currentUser.uid)
-      .get();
+    try {
+      // Fetch projects where viewed user is creator
+      const creatorProjectsSnapshot = await Firestore()
+        .collection('collaborations')
+        .where('creatorId', '==', viewedUserId)
+        .get();
       
-    const projects = projectsSnapshot.docs.map(doc => ({
-      ...doc.data(),
-      id: doc.id,
-    }));
+      // Fetch projects where viewed user is collaborator
+      const collaboratorProjectsSnapshot = await Firestore()
+        .collection('collaborations')
+        .where('collaborators', 'array-contains', viewedUserId)
+        .get();
+      
+      // Combine both sets and remove duplicates
+      const allProjects = new Map();
+      
+      creatorProjectsSnapshot.docs.forEach(doc => {
+        allProjects.set(doc.id, { ...doc.data(), id: doc.id });
+      });
+      
+      collaboratorProjectsSnapshot.docs.forEach(doc => {
+        if (!allProjects.has(doc.id)) {
+          allProjects.set(doc.id, { ...doc.data(), id: doc.id });
+        }
+      });
+      
+      const projects = Array.from(allProjects.values());
+      
+      // Sort locally
+      projects.sort((a, b) => {
+        const dateA = a.createdAt?.toDate?.() || new Date(0);
+        const dateB = b.createdAt?.toDate?.() || new Date(0);
+        return dateB - dateA;
+      });
+      
+      setCollaborationProjects(projects);
+    } catch (error) {
+      console.error('Error fetching collaboration projects:', error);
+      Alert.alert('Error', 'Failed to load projects');
+    }
+  };
+
+  // Fetch project participants details
+  const fetchProjectParticipants = async (project) => {
+    if (!project || !project.collaborators) return [];
     
-    // Sort locally
-    projects.sort((a, b) => {
-      const dateA = a.createdAt?.toDate?.() || new Date(0);
-      const dateB = b.createdAt?.toDate?.() || new Date(0);
-      return dateB - dateA;
-    });
+    setLoadingParticipants(true);
+    try {
+      const participantPromises = project.collaborators.map(async (userId) => {
+        try {
+          const userDoc = await Firestore().collection('users').doc(userId).get();
+          const profileDoc = await Firestore().collection('profile').doc(userId).get();
+          
+          if (userDoc.exists) {
+            return {
+              id: userId,
+              username: userDoc.data().username || 'User',
+              email: userDoc.data().email || '',
+              avatar: profileDoc.exists ? profileDoc.data().avatar : 'https://cdn.britannica.com/84/232784-050-1769B477/Siberian-Husky-dog.jpg',
+              isCreator: userId === project.creatorId
+            };
+          }
+          return null;
+        } catch (error) {
+          console.error('Error fetching user:', userId, error);
+          return null;
+        }
+      });
+      
+      const participants = (await Promise.all(participantPromises)).filter(p => p !== null);
+      setProjectParticipants(participants);
+      return participants;
+    } catch (error) {
+      console.error('Error fetching project participants:', error);
+      setProjectParticipants([]);
+      return [];
+    } finally {
+      setLoadingParticipants(false);
+    }
+  };
+
+  // Open project details modal for non-creators
+  const openProjectDetailsModal = async (project) => {
+    setSelectedProject(project);
+    await fetchProjectParticipants(project);
+    setProjectDetailsModalVisible(true);
+  };
+
+  // Close project details modal
+  const closeProjectDetailsModal = () => {
+    setProjectDetailsModalVisible(false);
+    setSelectedProject(null);
+    setProjectParticipants([]);
+  };
+
+  // Open editable project modal for creators
+  const openProjectEditModal = async (project) => {
+    setSelectedProject(project);
+    setEditProjectTitle(project.title || '');
+    setEditProjectAbout(project.about || '');
+    setEditProjectTech(project.tech || '');
+    setEditGithubRepo(project.githubRepo || '');
+    await fetchProjectParticipants(project);
+    setProjectEditModalVisible(true);
+  };
+
+  // Close editable project modal
+  const closeProjectEditModal = () => {
+    setProjectEditModalVisible(false);
+    setSelectedProject(null);
+    setEditProjectTitle('');
+    setEditProjectAbout('');
+    setEditProjectTech('');
+    setEditGithubRepo('');
+    setProjectParticipants([]);
+  };
+
+  // Update project details
+  const updateProject = async () => {
+    if (!selectedProject || !selectedProject.id) return;
     
-    setCollaborationProjects(projects);
-  } catch (error) {
-    Alert.alert('Error', 'Failed to load projects');
-  }
-};
+    if (!editProjectTitle.trim()) {
+      Alert.alert('Error', 'Please enter a project title');
+      return;
+    }
+    if (!editProjectAbout.trim()) {
+      Alert.alert('Error', 'Please enter project description');
+      return;
+    }
+
+    setUpdatingProject(true);
+    try {
+      await Firestore()
+        .collection('collaborations')
+        .doc(selectedProject.id)
+        .update({
+          title: editProjectTitle.trim(),
+          about: editProjectAbout.trim(),
+          tech: editProjectTech.trim(),
+          githubRepo: editGithubRepo.trim(),
+          updatedAt: Firestore.FieldValue.serverTimestamp(),
+        });
+
+      // Update local state
+      setCollaborationProjects(prev => 
+        prev.map(p => 
+          p.id === selectedProject.id 
+            ? { ...p, title: editProjectTitle.trim(), about: editProjectAbout.trim(), tech: editProjectTech.trim(), githubRepo: editGithubRepo.trim() }
+            : p
+        )
+      );
+
+      Alert.alert('Success', 'Project updated successfully!');
+      closeProjectEditModal();
+      // Refresh projects list
+      await fetchCollaborationProjects();
+    } catch (error) {
+      console.error('Error updating project:', error);
+      Alert.alert('Error', 'Failed to update project');
+    } finally {
+      setUpdatingProject(false);
+    }
+  };
 
 
   // Fetch user's questions from Firestore
@@ -422,7 +574,6 @@ const fetchCollaborationProjects = async () => {
   useEffect(() => {
     if (activeTab === 'questions' && viewedUserId) {
       fetchUserQuestions(viewedUserId);
-      setLoadingQuestions(true);
     }
   }, [activeTab, viewedUserId]);
 
@@ -448,10 +599,10 @@ const fetchCollaborationProjects = async () => {
   }, [currentUser?.uid, viewedUserId, isOwnProfile]);
 
   useEffect(() => {
-  if (activeTab === 'Collaborations' && isOwnProfile) {
+  if (activeTab === 'Collaborations' && viewedUserId) {
     fetchCollaborationProjects();
   }
-}, [activeTab, isOwnProfile]);
+}, [activeTab, viewedUserId]);
 
   const ensureProfileExists = async (userId) => {
     try {
@@ -595,7 +746,12 @@ const fetchCollaborationProjects = async () => {
     }
   };
 
-  const selectImage = () => {
+  const selectImage = async () => {
+const haspermission=await requestgallerypermission();
+if(!haspermission){
+  return;
+}
+
     launchImageLibrary(
       { mediaType: 'photo', quality: 0.8, includeBase64: false },
       (response) => {
@@ -656,6 +812,11 @@ const fetchCollaborationProjects = async () => {
 
   const handleAvatarChange = async () => {
     if (!isOwnProfile || !currentUser) return;
+
+    const haspermission=await requestgallerypermission();
+    if(!haspermission){
+      return;
+    }
     
     try {
       const result = await launchImageLibrary({
@@ -917,41 +1078,457 @@ const fetchCollaborationProjects = async () => {
     }
     
     if (activeTab === 'Collaborations') {
+      // Calculate project stats
+      const createdProjects = collaborationProjects.filter(p => p.creatorId === viewedUserId).length;
+      const participatedProjects = collaborationProjects.filter(p => 
+        p.collaborators?.includes(viewedUserId) && p.creatorId !== viewedUserId
+      ).length;
+      const ongoingProjects = collaborationProjects.filter(p => 
+        p.status !== 'completed' && p.status !== 'pending'
+      ).length;
+      const completedProjects = collaborationProjects.filter(p => p.status === 'completed').length;
+      
       return (
-        <View style={styles.tabContent}>
-          <Icon name="people-outline" size={64} color="#666" />
-          <Text style={styles.emptyText}>
-            {isOwnProfile ? 'Start collaborating on projects' : 'No collaborations yet'}
-          </Text>
-          {isOwnProfile && (
+        <View style={styles.collaborationTabContent}>
+          <View style={styles.collaborationHeader}>
             <TouchableOpacity 
-              style={styles.askCollaborationButton}
-              onPress={openCollaborationModal}
+              style={styles.projectStatsButton}
+              onPress={() => setProjectStatsModalVisible(true)}
             >
-              <Icon name="add-circle-outline" size={24} color="black" />
-              <Text style={styles.askCollaborationButtonText}>Create a Project</Text>
+              <Icon name="stats-chart-outline" size={20} color="white" />
+              <Text style={styles.projectStatsButtonText}>Project Stats</Text>
             </TouchableOpacity>
-          )}
-             <ScrollView showsVerticalScrollIndicator={false}>
-        {collaborationProjects.map((project) => (   
-          <TouchableOpacity
-            key={project.id}
-            style={styles.projectCard}
-            onPress={() => openCollaborationModal()}
-            activeOpacity={0.8}
-          >
-            <View style={styles.cardHeader}>
-              <Text style={styles.cardTitle} numberOfLines={1}>{project.title}</Text>
+            {isOwnProfile && (
+              <TouchableOpacity 
+                style={styles.createProjectButtonTop}
+                onPress={openCollaborationModal}
+              >
+                <Icon name="add-circle-outline" size={24} color="white" />
+                <Text style={styles.createProjectButtonTextTop}>Create Project</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          
+          {collaborationProjects.length === 0 ? (
+            <View style={styles.emptyState}>
+              <Icon name="people-outline" size={64} color="#666" />
+              <Text style={styles.emptyText}>
+                {isOwnProfile ? 'Start collaborating on projects' : 'No collaborations yet'}
+              </Text>
             </View>
-            <Text style={styles.cardAbout} numberOfLines={3}>
-              {project.about}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
-    </View>
-  );
-}
+          ) : (
+            <ScrollView showsVerticalScrollIndicator={false} style={styles.projectsScrollView}>
+              {collaborationProjects.map((project) => {
+                const isCompleted = project.status === 'completed';
+                const isOngoing = project.status !== 'completed' && project.status !== 'pending';
+                const isCreator = project.creatorId === currentUser?.uid;
+                const isParticipant = !isCreator && project.collaborators?.includes(currentUser?.uid);
+                
+                const projectCreatorId = project.creatorId;
+                const isCurrentUserCreator = projectCreatorId === currentUser?.uid;
+                
+                return (
+                  <TouchableOpacity
+                    key={project.id}
+                    style={styles.projectCard}
+                    onPress={() => {
+                      if (isCurrentUserCreator) {
+                        // Creator sees editable form
+                        openProjectEditModal(project);
+                      } else {
+                        // Non-creators see read-only project details
+                        openProjectDetailsModal(project);
+                      }
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <View style={styles.cardHeader}>
+                      <Text style={styles.cardTitle} numberOfLines={1}>{project.title}</Text>
+                      {isCompleted && (
+                        <View style={styles.statusTagCompleted}>
+                          <Text style={styles.statusTagTextCompleted}>Completed</Text>
+                        </View>
+                      )}
+                      {isOngoing && (
+                        <View style={styles.statusTagOngoing}>
+                          <Text style={styles.statusTagTextOngoing}>Ongoing</Text>
+                        </View>
+                      )}
+                      {!isCompleted && !isOngoing && (
+                        <View style={styles.statusTagPending}>
+                          <Text style={styles.statusTagTextPending}>Pending</Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text style={styles.cardAbout} numberOfLines={3}>
+                      {project.about}
+                    </Text>
+                    {currentUser?.uid && (isCreator || isParticipant) && (
+                      <View style={styles.roleContainer}>
+                        {isCreator ? (
+                          <View style={styles.roleTagCreator}>
+                            <Icon name="star" size={12} color="#FFD700" />
+                            <Text style={styles.roleTextCreator}>Creator</Text>
+                          </View>
+                        ) : isParticipant ? (
+                          <View style={styles.roleTagParticipant}>
+                            <Icon name="people" size={12} color="#007AFF" />
+                            <Text style={styles.roleTextParticipant}>Participant</Text>
+                          </View>
+                        ) : null}
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          )}
+          
+          {/* Project Stats Modal */}
+          <Modal
+            visible={projectStatsModalVisible}
+            animationType="slide"
+            transparent={true}
+            onRequestClose={() => setProjectStatsModalVisible(false)}
+          >
+            <View style={styles.modalOverlay}>
+              <View style={styles.projectStatsModalContainer}>
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>Project Statistics</Text>
+                  <TouchableOpacity onPress={() => setProjectStatsModalVisible(false)}>
+                    <Icon name="close" size={24} color="white" />
+                  </TouchableOpacity>
+                </View>
+                
+                <View style={styles.statsFormContainer}>
+                  <View style={styles.statsFormRow}>
+                    <Text style={styles.statsFormLabel}>Projects Created:</Text>
+                    <Text style={styles.statsFormValue}>{createdProjects}</Text>
+                  </View>
+                  
+                  <View style={styles.statsFormRow}>
+                    <Text style={styles.statsFormLabel}>Projects Participated:</Text>
+                    <Text style={styles.statsFormValue}>{participatedProjects}</Text>
+                  </View>
+                  
+                  <View style={styles.statsFormRow}>
+                    <Text style={styles.statsFormLabel}>Ongoing:</Text>
+                    <Text style={styles.statsFormValue}>{ongoingProjects}</Text>
+                  </View>
+                  
+                  <View style={styles.statsFormRow}>
+                    <Text style={styles.statsFormLabel}>Completed:</Text>
+                    <Text style={styles.statsFormValue}>{completedProjects}</Text>
+                  </View>
+                </View>
+              </View>
+            </View>
+          </Modal>
+          
+          {/* Project Details Modal for Non-Creators */}
+          <Modal
+            visible={projectDetailsModalVisible}
+            animationType="slide"
+            transparent={true}
+            onRequestClose={closeProjectDetailsModal}
+          >
+            <View style={styles.modalOverlay}>
+              <View style={styles.projectDetailsModalContainer}>
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>Project Details</Text>
+                  <TouchableOpacity onPress={closeProjectDetailsModal}>
+                    <Icon name="close" size={24} color="white" />
+                  </TouchableOpacity>
+                </View>
+                
+                <ScrollView 
+                  style={styles.projectDetailsContent}
+                  showsVerticalScrollIndicator={false}
+                >
+                  {selectedProject && (
+                    <>
+                      <View style={styles.detailFormRow}>
+                        <Text style={styles.detailFormLabel}>Project Title:</Text>
+                        <Text style={styles.detailFormValue} numberOfLines={2}>
+                          {selectedProject.title || 'N/A'}
+                        </Text>
+                      </View>
+                      
+                      <View style={styles.detailFormRow}>
+                        <Text style={styles.detailFormLabel}>About Project:</Text>
+                        <Text style={styles.detailFormValue} numberOfLines={10}>
+                          {selectedProject.about || 'N/A'}
+                        </Text>
+                      </View>
+                      
+                      <View style={styles.detailFormRow}>
+                        <Text style={styles.detailFormLabel}>Technologies:</Text>
+                        <Text style={styles.detailFormValue} numberOfLines={3}>
+                          {selectedProject.tech || 'N/A'}
+                        </Text>
+                      </View>
+                      
+                      <View style={styles.detailFormRow}>
+                        <Text style={styles.detailFormLabel}>GitHub Repository:</Text>
+                        {selectedProject.githubRepo ? (
+                          <Text style={styles.detailFormValueLink} numberOfLines={1}>
+                            {selectedProject.githubRepo}
+                          </Text>
+                        ) : (
+                          <Text style={styles.detailFormValue}>N/A</Text>
+                        )}
+                      </View>
+                      
+                      <View style={styles.detailFormRow}>
+                        <Text style={styles.detailFormLabel}>Status:</Text>
+                        <View style={styles.statusTagContainer}>
+                          {selectedProject.status === 'completed' && (
+                            <View style={styles.statusTagCompleted}>
+                              <Text style={styles.statusTagTextCompleted}>Completed</Text>
+                            </View>
+                          )}
+                          {selectedProject.status !== 'completed' && selectedProject.status !== 'pending' && (
+                            <View style={styles.statusTagOngoing}>
+                              <Text style={styles.statusTagTextOngoing}>Ongoing</Text>
+                            </View>
+                          )}
+                          {selectedProject.status === 'pending' && (
+                            <View style={styles.statusTagPending}>
+                              <Text style={styles.statusTagTextPending}>Pending</Text>
+                            </View>
+                          )}
+                        </View>
+                      </View>
+                      
+                      <View style={styles.detailFormRow}>
+                        <Text style={styles.detailFormLabel}>Created By:</Text>
+                        <Text style={styles.detailFormValue}>
+                          {selectedProject.creatorUsername || 'Unknown'}
+                        </Text>
+                      </View>
+                      
+                      {selectedProject.createdAt && (
+                        <View style={styles.detailFormRow}>
+                          <Text style={styles.detailFormLabel}>Created At:</Text>
+                          <Text style={styles.detailFormValue}>
+                            {selectedProject.createdAt.toDate 
+                              ? new Date(selectedProject.createdAt.toDate()).toLocaleDateString()
+                              : 'N/A'}
+                          </Text>
+                        </View>
+                      )}
+                      
+                      <View style={styles.participantsSection}>
+                        <Text style={styles.participantsSectionTitle}>Active Participants</Text>
+                        {loadingParticipants ? (
+                          <ActivityIndicator size="large" color="#007AFF" style={{ marginTop: 20 }} />
+                        ) : projectParticipants.length === 0 ? (
+                          <Text style={styles.noParticipantsText}>No participants found</Text>
+                        ) : (
+                          <View style={styles.participantsList}>
+                            {projectParticipants.map((participant) => (
+                              <View key={participant.id} style={styles.participantItem}>
+                                <Image 
+                                  source={{ uri: participant.avatar }} 
+                                  style={styles.participantAvatar} 
+                                />
+                                <View style={styles.participantInfo}>
+                                  <View style={styles.participantNameRow}>
+                                    <Text style={styles.participantName}>{participant.username}</Text>
+                                    {participant.isCreator && (
+                                      <View style={styles.creatorBadge}>
+                                        <Icon name="star" size={14} color="#FFD700" />
+                                        <Text style={styles.creatorBadgeText}>Creator</Text>
+                                      </View>
+                                    )}
+                                  </View>
+                                  <Text style={styles.participantEmail}>{participant.email}</Text>
+                                </View>
+                              </View>
+                            ))}
+                          </View>
+                        )}
+                      </View>
+                    </>
+                  )}
+                </ScrollView>
+              </View>
+            </View>
+          </Modal>
+          
+          {/* Editable Project Details Modal for Creators */}
+          <Modal
+            visible={projectEditModalVisible}
+            animationType="slide"
+            transparent={true}
+            onRequestClose={closeProjectEditModal}
+          >
+            <View style={styles.modalOverlay}>
+              <View style={styles.projectDetailsModalContainer}>
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>Edit Project</Text>
+                  <TouchableOpacity onPress={closeProjectEditModal}>
+                    <Icon name="close" size={24} color="white" />
+                  </TouchableOpacity>
+                </View>
+                
+                <ScrollView 
+                  style={styles.projectDetailsContent}
+                  showsVerticalScrollIndicator={false}
+                >
+                  {selectedProject && (
+                    <>
+                      <View style={styles.inputSection}>
+                        <Text style={styles.inputLabel}>Project Title *</Text>
+                        <TextInput
+                          style={styles.input}
+                          placeholder="Enter project title"
+                          placeholderTextColor="#666"
+                          value={editProjectTitle}
+                          onChangeText={setEditProjectTitle}
+                          maxLength={100}
+                        />
+                      </View>
+
+                      <View style={styles.inputSection}>
+                        <Text style={styles.inputLabel}>About Project *</Text>
+                        <TextInput
+                          style={[styles.input, styles.textArea]}
+                          placeholder="Describe your project..."
+                          placeholderTextColor="#666"
+                          value={editProjectAbout}
+                          onChangeText={setEditProjectAbout}
+                          multiline
+                          numberOfLines={4}
+                          maxLength={500}
+                        />
+                      </View>
+
+                      <View style={styles.inputSection}>
+                        <Text style={styles.inputLabel}>Technologies</Text>
+                        <TextInput
+                          style={styles.input}
+                          placeholder="e.g., React Native, Firebase, Node.js"
+                          placeholderTextColor="#666"
+                          value={editProjectTech}
+                          onChangeText={setEditProjectTech}
+                          maxLength={200}
+                        />
+                      </View>
+
+                      <View style={styles.inputSection}>
+                        <Text style={styles.inputLabel}>GitHub Repository</Text>
+                        <TextInput
+                          style={styles.input}
+                          placeholder="https://github.com/username/repo"
+                          placeholderTextColor="#666"
+                          value={editGithubRepo}
+                          onChangeText={setEditGithubRepo}
+                          maxLength={200}
+                          autoCapitalize="none"
+                        />
+                      </View>
+
+                      <View style={styles.detailFormRow}>
+                        <Text style={styles.detailFormLabel}>Status:</Text>
+                        <View style={styles.statusTagContainer}>
+                          {selectedProject.status === 'completed' && (
+                            <View style={styles.statusTagCompleted}>
+                              <Text style={styles.statusTagTextCompleted}>Completed</Text>
+                            </View>
+                          )}
+                          {selectedProject.status !== 'completed' && selectedProject.status !== 'pending' && (
+                            <View style={styles.statusTagOngoing}>
+                              <Text style={styles.statusTagTextOngoing}>Ongoing</Text>
+                            </View>
+                          )}
+                          {selectedProject.status === 'pending' && (
+                            <View style={styles.statusTagPending}>
+                              <Text style={styles.statusTagTextPending}>Pending</Text>
+                            </View>
+                          )}
+                        </View>
+                      </View>
+                      
+                      <View style={styles.detailFormRow}>
+                        <Text style={styles.detailFormLabel}>Created At:</Text>
+                        <Text style={styles.detailFormValue}>
+                          {selectedProject.createdAt?.toDate 
+                            ? new Date(selectedProject.createdAt.toDate()).toLocaleDateString()
+                            : 'N/A'}
+                        </Text>
+                      </View>
+                      
+                      {selectedProject.status === 'completed' && selectedProject.completedAt && (
+                        <View style={styles.detailFormRow}>
+                          <Text style={styles.detailFormLabel}>Completed At:</Text>
+                          <Text style={styles.detailFormValue}>
+                            {selectedProject.completedAt.toDate 
+                              ? new Date(selectedProject.completedAt.toDate()).toLocaleDateString()
+                              : 'N/A'}
+                          </Text>
+                        </View>
+                      )}
+                      
+                      <View style={styles.participantsSection}>
+                        <Text style={styles.participantsSectionTitle}>Active Participants</Text>
+                        {loadingParticipants ? (
+                          <ActivityIndicator size="large" color="#007AFF" style={{ marginTop: 20 }} />
+                        ) : projectParticipants.length === 0 ? (
+                          <Text style={styles.noParticipantsText}>No participants found</Text>
+                        ) : (
+                          <View style={styles.participantsList}>
+                            {projectParticipants.map((participant) => (
+                              <View key={participant.id} style={styles.participantItem}>
+                                <Image 
+                                  source={{ uri: participant.avatar }} 
+                                  style={styles.participantAvatar} 
+                                />
+                                <View style={styles.participantInfo}>
+                                  <View style={styles.participantNameRow}>
+                                    <Text style={styles.participantName}>{participant.username}</Text>
+                                    {participant.isCreator && (
+                                      <View style={styles.creatorBadge}>
+                                        <Icon name="star" size={14} color="#FFD700" />
+                                        <Text style={styles.creatorBadgeText}>Creator</Text>
+                                      </View>
+                                    )}
+                                  </View>
+                                  <Text style={styles.participantEmail}>{participant.email}</Text>
+                                </View>
+                              </View>
+                            ))}
+                          </View>
+                        )}
+                      </View>
+
+                      <View style={styles.editProjectActions}>
+                        <TouchableOpacity
+                          style={[styles.saveButton, updatingProject && styles.disabledButton]}
+                          onPress={updateProject}
+                          disabled={updatingProject}
+                        >
+                          <Text style={styles.saveButtonText}>
+                            {updatingProject ? 'Saving...' : 'Save Changes'}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    </>
+                  )}
+                </ScrollView>
+                
+                {updatingProject && (
+                  <View style={styles.uploadingContainer}>
+                    <ActivityIndicator size="large" color="#007AFF" />
+                    <Text style={styles.uploadingText}>Updating project...</Text>
+                  </View>
+                )}
+              </View>
+            </View>
+          </Modal>
+        </View>
+      );
+    }
     return null;
   };
 
@@ -1454,6 +2031,108 @@ const styles = StyleSheet.create({
     justifyContent: 'center', 
     paddingVertical: 40 
   },
+  collaborationTabContent: {
+    flex: 1,
+    width: '100%',
+  },
+  collaborationHeader: {
+    width: '100%',
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    marginBottom: 16,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  projectStatsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#333',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#555',
+  },
+  projectStatsButtonText: {
+    color: 'white',
+    fontWeight: '600',
+    fontSize: 16,
+    marginLeft: 8,
+  },
+  createProjectButtonTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 8,
+  },
+  createProjectButtonTextTop: {
+    color: 'white',
+    fontWeight: '600',
+    fontSize: 16,
+    marginLeft: 8,
+  },
+  projectStatsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'flex-start',
+    gap: 24,
+  },
+  projectStatBox: {
+    alignItems: 'center',
+  },
+  projectStatNumber: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: 'white',
+  },
+  projectStatLabel: {
+    fontSize: 14,
+    color: '#ccc',
+    marginTop: 4,
+  },
+  projectsScrollView: {
+    flex: 1,
+    width: '100%',
+    paddingHorizontal: 16,
+  },
+  statusTagCompleted: {
+    backgroundColor: '#10B981',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginLeft: 8,
+  },
+  statusTagOngoing: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginLeft: 8,
+  },
+  statusTagPending: {
+    backgroundColor: '#F59E0B',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginLeft: 8,
+  },
+  statusTagTextCompleted: {
+    color: 'white',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  statusTagTextOngoing: {
+    color: 'white',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  statusTagTextPending: {
+    color: 'white',
+    fontSize: 11,
+    fontWeight: '600',
+  },
   gridContainer: {
     paddingBottom: 20,
     alignItems: 'center',
@@ -1833,15 +2512,12 @@ const styles = StyleSheet.create({
   padding: 16,
 },
 projectCard: {
-  backgroundColor: '#fff',
+  backgroundColor: '#2a2a2a',
   borderRadius: 12,
   padding: 16,
   marginBottom: 12,
-  shadowColor: '#000',
-  shadowOffset: { width: 0, height: 2 },
-  shadowOpacity: 0.1,
-  shadowRadius: 4,
-  elevation: 3,
+  borderWidth: 1,
+  borderColor: '#333',
 },
 cardHeader: {
   flexDirection: 'row',
@@ -1852,12 +2528,12 @@ cardHeader: {
 cardTitle: {
   fontSize: 18,
   fontWeight: 'bold',
-  color: '#000',
+  color: 'white',
   flex: 1,
 },
 cardAbout: {
   fontSize: 14,
-  color: '#666',
+  color: '#ccc',
   marginBottom: 8,
   lineHeight: 20,
 },
@@ -1879,6 +2555,197 @@ collaboratorCount: {
   color: '#666',
   marginLeft: 4,
 },
+roleContainer: {
+  marginTop: 8,
+  flexDirection: 'row',
+  alignItems: 'center',
+},
+roleTagCreator: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  backgroundColor: 'rgba(255, 215, 0, 0.2)',
+  paddingHorizontal: 8,
+  paddingVertical: 4,
+  borderRadius: 12,
+  borderWidth: 1,
+  borderColor: '#FFD700',
+},
+roleTextCreator: {
+  color: '#FFD700',
+  fontSize: 11,
+  fontWeight: '600',
+  marginLeft: 4,
+},
+roleTagParticipant: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  backgroundColor: 'rgba(0, 122, 255, 0.2)',
+  paddingHorizontal: 8,
+  paddingVertical: 4,
+  borderRadius: 12,
+  borderWidth: 1,
+  borderColor: '#007AFF',
+},
+  roleTextParticipant: {
+    color: '#007AFF',
+    fontSize: 11,
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+  projectStatsModalContainer: {
+    backgroundColor: '#1e1e1e',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '60%',
+    paddingBottom: 20,
+  },
+  statsFormContainer: {
+    padding: 20,
+  },
+  statsFormRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
+  },
+  statsFormLabel: {
+    color: '#ccc',
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  statsFormValue: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  projectDetailsModalContainer: {
+    backgroundColor: '#1e1e1e',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '90%',
+    height: '90%',
+  },
+  projectDetailsContent: {
+    flex: 1,
+    padding: 20,
+  },
+  detailFormRow: {
+    marginBottom: 20,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
+  },
+  detailFormLabel: {
+    color: '#999',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 8,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  detailFormValue: {
+    color: 'white',
+    fontSize: 16,
+    lineHeight: 24,
+  },
+  detailFormValueLink: {
+    color: '#007AFF',
+    fontSize: 16,
+    lineHeight: 24,
+  },
+  statusTagContainer: {
+    marginTop: 4,
+  },
+  participantsSection: {
+    marginTop: 20,
+    paddingTop: 20,
+    borderTopWidth: 2,
+    borderTopColor: '#333',
+  },
+  participantsSectionTitle: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 16,
+  },
+  participantsList: {
+    // gap property handled by marginBottom in participantItem
+  },
+  participantItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#2a2a2a',
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#333',
+    marginBottom: 12,
+  },
+  participantAvatar: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    marginRight: 12,
+  },
+  participantInfo: {
+    flex: 1,
+  },
+  participantNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  participantName: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: '600',
+    marginRight: 8,
+  },
+  creatorBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 215, 0, 0.2)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#FFD700',
+  },
+  creatorBadgeText: {
+    color: '#FFD700',
+    fontSize: 10,
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+  participantEmail: {
+    color: '#999',
+    fontSize: 12,
+  },
+  noParticipantsText: {
+    color: '#666',
+    fontSize: 14,
+    textAlign: 'center',
+    marginTop: 20,
+  },
+  editProjectActions: {
+    marginTop: 24,
+    marginBottom: 20,
+  },
+  saveButton: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  saveButtonText: {
+    color: 'white',
+    fontWeight: '600',
+    fontSize: 16,
+  },
 });
 
 export default Profile;

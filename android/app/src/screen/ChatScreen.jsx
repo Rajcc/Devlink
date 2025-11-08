@@ -38,11 +38,53 @@ export default function ChatScreen({ route, navigation }) {
   const [headerAvatar, setHeaderAvatar] = useState(avatar || '');
   const flatListRef = useRef(null);
   const currentUserUid = auth().currentUser.uid;
+  const [chatData, setChatData] = useState(null);
+  const [isCreator, setIsCreator] = useState(false);
 
   // Keep actualChatId in sync when navigation params change
   useEffect(() => {
     setActualChatId(chatId);
   }, [chatId]);
+
+  // Fetch chat data to check if it's a group chat and if user is creator
+  useEffect(() => {
+    const fetchChatData = async () => {
+      if (!actualChatId || actualChatId.startsWith('temp_') || actualChatId.startsWith('request_')) {
+        return;
+      }
+      
+      try {
+        const chatDoc = await firestore().collection('chats').doc(actualChatId).get();
+        if (chatDoc.exists) {
+          const data = chatDoc.data();
+          setChatData(data);
+          
+          // Check if it's a group chat and if current user is the creator
+          if (data.type === 'group' && data.createdBy === currentUserUid) {
+            // Also check if project is not already completed
+            const projectsSnapshot = await firestore()
+              .collection('collaborations')
+              .where('chatId', '==', actualChatId)
+              .get();
+            
+            if (!projectsSnapshot.empty) {
+              const projectData = projectsSnapshot.docs[0].data();
+              // Only show button if project is not completed
+              setIsCreator(projectData.status !== 'completed');
+            } else {
+              setIsCreator(true); // Show button if project not found (edge case)
+            }
+          } else {
+            setIsCreator(false);
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching chat data:', error);
+      }
+    };
+    
+    fetchChatData();
+  }, [actualChatId, currentUserUid]);
 
   // If header data is missing, try to fetch from profile
   useEffect(() => {
@@ -82,32 +124,78 @@ export default function ChatScreen({ route, navigation }) {
       ),
       headerRight: !isRequestMode && actualChatId && !actualChatId.startsWith('temp_') && !actualChatId.startsWith('request_')
         ? () => (
-            <TouchableOpacity
-              onPress={() => {
-                Alert.alert(
-                  'Delete Chat',
-                  'This will delete the conversation for all participants. This action cannot be undone.',
-                  [
-                    { text: 'Cancel', style: 'cancel' },
-                    {
-                      text: 'Delete',
-                      style: 'destructive',
-                      onPress: async () => {
-                        try {
-                          await chatService.deleteChatPermanently(actualChatId);
-                          navigation.goBack();
-                        } catch (e) {
-                          Alert.alert('Error', 'Failed to delete chat. Please try again.');
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              {isCreator && chatData?.type === 'group' && (
+                <TouchableOpacity
+                  onPress={async () => {
+                    Alert.alert(
+                      'Mark Project as Completed',
+                      'Are you sure you want to mark this project as completed?',
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        {
+                          text: 'Done',
+                          onPress: async () => {
+                            try {
+                              // Find the project associated with this chatId
+                              const projectsSnapshot = await firestore()
+                                .collection('collaborations')
+                                .where('chatId', '==', actualChatId)
+                                .get();
+                              
+                              if (!projectsSnapshot.empty) {
+                                const projectDoc = projectsSnapshot.docs[0];
+                                await projectDoc.ref.update({
+                                  status: 'completed',
+                                  completedAt: firestore.FieldValue.serverTimestamp()
+                                });
+                                
+                                Alert.alert('Success', 'Project marked as completed!');
+                                setIsCreator(false); // Hide the button after completion
+                              } else {
+                                Alert.alert('Error', 'Project not found for this chat.');
+                              }
+                            } catch (e) {
+                              console.error('Error marking project as completed:', e);
+                              Alert.alert('Error', 'Failed to mark project as completed.');
+                            }
+                          }
+                        }
+                      ]
+                    );
+                  }}
+                  style={{ paddingHorizontal: 12, marginRight: 8 }}
+                >
+                  <Text style={{ color: '#4e9bde', fontWeight: 'bold' }}>Done</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                onPress={() => {
+                  Alert.alert(
+                    'Delete Chat',
+                    'This will delete the conversation for all participants. This action cannot be undone.',
+                    [
+                      { text: 'Cancel', style: 'cancel' },
+                      {
+                        text: 'Delete',
+                        style: 'destructive',
+                        onPress: async () => {
+                          try {
+                            await chatService.deleteChatPermanently(actualChatId);
+                            navigation.goBack();
+                          } catch (e) {
+                            Alert.alert('Error', 'Failed to delete chat. Please try again.');
+                          }
                         }
                       }
-                    }
-                  ]
-                );
-              }}
-              style={{ paddingHorizontal: 12 }}
-            >
-              <Text style={{ color: 'red', fontWeight: 'bold' }}>Delete</Text>
-            </TouchableOpacity>
+                    ]
+                  );
+                }}
+                style={{ paddingHorizontal: 12 }}
+              >
+                <Text style={{ color: 'red', fontWeight: 'bold' }}>Delete</Text>
+              </TouchableOpacity>
+            </View>
           )
         : undefined,
       headerTitle: () => (
@@ -136,7 +224,7 @@ export default function ChatScreen({ route, navigation }) {
     return () => {
       // Cleanup will be handled by individual functions
     };
-  }, [chatId, headerTitle, headerAvatar, navigation, isMessageRequest, isRequestMode]);
+  }, [chatId, headerTitle, headerAvatar, navigation, isMessageRequest, isRequestMode, isCreator, chatData, actualChatId]);
 
   // If we still don't have header info but we do have recipientInfo from navigation, use it immediately
   useEffect(() => {
